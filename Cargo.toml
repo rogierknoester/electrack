@@ -1,0 +1,18 @@
+[package]
+name = "electricity-price-optimiser"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = { version = "0.4.38", features = ["default", "serde"] }
+log = "0.4.21"
+reqwest = { version = "0.12.4", features = ["default", "json"] }
+serde = { version = "1.0.203" , features = ["std", "derive"] }
+serde_derive = "1.0.203"
+serde_json = "1.0.117"
+thiserror = "1.0.61"
+tokio = { version = "1.38.0", features = ["full"] }
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+url = "2.5.1"
+axum = { version = "0.7.5", features = ["default"] }
