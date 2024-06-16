@@ -84,10 +84,13 @@ struct OptimalWindow {
     duration: usize,
     from: DateTime<Local>,
     to: DateTime<Local>,
-    average_price: f64,
+    average_price: String,
     prices: Vec<PricePoint>,
 }
 
+
+/// Calculate, for a set of hour durations, the optimal window to consume electricity based on
+/// the average price of electricity during that window.
 fn calculate_optimal_windows(prices: Vec<PricePoint>, durations: Vec<usize>) -> Vec<OptimalWindow> {
     let mut optimal_windows: Vec<OptimalWindow> = vec![];
 
@@ -121,7 +124,7 @@ fn calculate_optimal_windows(prices: Vec<PricePoint>, durations: Vec<usize>) -> 
                 duration,
                 from: DateTime::parse_from_rfc3339(&starting_price_point.starts_at).unwrap().with_timezone(&Local),
                 to: DateTime::parse_from_rfc3339(&prices[i + duration - 1].starts_at).unwrap().with_timezone(&Local),
-                average_price: total_price_for_window / duration as f64,
+                average_price: format!("{:.3}", total_price_for_window / duration as f64),
                 prices: prices[i..i + duration].to_vec(),
             });
         }
@@ -152,11 +155,17 @@ async fn get_prices(api_key: &str) -> reqwest::Result<Vec<PricePoint>> {
 
     let body = response.text().await?;
 
-    let data = serde_json::from_str::<Response>(&body).expect("Failed to parse tibber's response");
+    let prices = parse_prices_json(&body);
 
-    info!("Fetched {} prices from tibber", data.data.viewer.homes[0].current_subscription.price_info.today.len());
+    info!("Fetched {} prices from tibber", prices.len());
 
-    return Ok(data.data.viewer.homes[0].current_subscription.price_info.today.clone());
+    Ok(prices)
+}
+
+fn parse_prices_json(json: &str) -> Vec<PricePoint> {
+    let data = serde_json::from_str::<Response>(json).expect("Failed to parse tibber's response");
+
+    return data.data.viewer.homes[0].current_subscription.price_info.today.clone();
 }
 
 #[derive(Deserialize, Debug)]
@@ -197,3 +206,25 @@ struct PricePoint {
     #[serde(rename = "startsAt")]
     starts_at: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_prices_json() {
+        let json = r#"
+            {"data":{"viewer":{"homes":[{"currentSubscription":{"priceInfo":{"today":[{"total":0.2821,"startsAt":"2024-06-15T00:00:00.000+02:00"},{"total":0.2787,"startsAt":"2024-06-15T01:00:00.000+02:00"},{"total":0.2666,"startsAt":"2024-06-15T02:00:00.000+02:00"},{"total":0.2581,"startsAt":"2024-06-15T03:00:00.000+02:00"},{"total":0.2213,"startsAt":"2024-06-15T04:00:00.000+02:00"},{"total":0.1769,"startsAt":"2024-06-15T05:00:00.000+02:00"},{"total":0.1547,"startsAt":"2024-06-15T06:00:00.000+02:00"},{"total":0.1529,"startsAt":"2024-06-15T07:00:00.000+02:00"},{"total":0.1528,"startsAt":"2024-06-15T08:00:00.000+02:00"},{"total":0.1528,"startsAt":"2024-06-15T09:00:00.000+02:00"},{"total":0.1406,"startsAt":"2024-06-15T10:00:00.000+02:00"},{"total":0.1177,"startsAt":"2024-06-15T11:00:00.000+02:00"},{"total":0.0985,"startsAt":"2024-06-15T12:00:00.000+02:00"},{"total":0.0736,"startsAt":"2024-06-15T13:00:00.000+02:00"},{"total":0.056,"startsAt":"2024-06-15T14:00:00.000+02:00"},{"total":0.0849,"startsAt":"2024-06-15T15:00:00.000+02:00"},{"total":0.1175,"startsAt":"2024-06-15T16:00:00.000+02:00"},{"total":0.1474,"startsAt":"2024-06-15T17:00:00.000+02:00"},{"total":0.1528,"startsAt":"2024-06-15T18:00:00.000+02:00"},{"total":0.1917,"startsAt":"2024-06-15T19:00:00.000+02:00"},{"total":0.2375,"startsAt":"2024-06-15T20:00:00.000+02:00"},{"total":0.2348,"startsAt":"2024-06-15T21:00:00.000+02:00"},{"total":0.2294,"startsAt":"2024-06-15T22:00:00.000+02:00"},{"total":0.2021,"startsAt":"2024-06-15T23:00:00.000+02:00"}]}}}]}}}
+            "#;
+
+        let prices = parse_prices_json(json);
+
+        assert_eq!(prices.len(), 24);
+        assert_eq!(prices[0].total, 0.2821);
+        assert_eq!(prices[0].starts_at, "2024-06-15T00:00:00.000+02:00");
+
+        assert_eq!(prices[23].total, 0.2021);
+        assert_eq!(prices[23].starts_at, "2024-06-15T23:00:00.000+02:00");
+    }
+}
+
