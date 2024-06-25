@@ -235,9 +235,9 @@ impl PriceRepository for PostgresPriceRepository {
             duration = duration.clamp(0, 23);
 
             let row = sqlx::query_as::<_, PriceWindow>(r#"
-            select moment                                                               as starts_at,
+            select moment                                                                        as starts_at,
             round((avg(prices.price) over price_window)::numeric, 3)::varchar                    as average_price,
-            ((max(moment) over price_window) + interval '1 hour' - interval '1 second') as ends_at
+            ((max(moment) over price_window) + interval '59 minutes 59 seconds') as ends_at
             from prices
             where moment::date = $1
             window price_window as ( partition by moment::date order by moment rows between current row and $2 following )
