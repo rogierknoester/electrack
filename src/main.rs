@@ -1,25 +1,55 @@
-use axum::{Json, Router, serve};
+use std::sync::Arc;
+
+use axum::{async_trait, Json, Router, serve};
 use axum::extract::{Query, State};
+use axum::response::IntoResponse;
 use axum::routing::get;
-use chrono::{DateTime, Local};
-use log::info;
-use reqwest::{Client, StatusCode};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, Utc};
+use log::{error, info};
+use reqwest::StatusCode;
 use serde_derive::{Deserialize, Serialize};
+use sqlx::{Error, FromRow, PgPool, QueryBuilder};
+use sqlx::postgres::{PgPoolOptions, PgRow};
+use thiserror::Error;
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
+use tracing::instrument;
+use tracing_subscriber::fmt::format::FmtSpan;
+
+mod tibber;
 
 const APP_NAME: &str = "electricity-price-optimiser";
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_span_events(FmtSpan::CLOSE)
+        .init();
+    tracing::trace!("This is a trace message");
 
     info!("Starting {}", APP_NAME);
 
     let api_key = std::env::var("TIBBER_API_KEY").expect("TIBBER_API_KEY must be set");
-    let port = std::env::var("PORT").unwrap_or("3000".to_string());
+    let port = std::env::var("PORT").unwrap_or("8080".to_string());
 
-    let app_state = AppState::new(api_key);
+    let db_dsn = std::env::var("DB_URL").expect("DB_URL must be set");
 
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_dsn)
+        .await
+        .expect("Failed to create pool");
+
+
+    let tibber = tibber::Tibber::new(api_key.clone());
+    let price_repository = PostgresPriceRepository::new(pool.clone());
+
+    let app_state = AppState::new(
+        pool,
+        Arc::new(Box::new(tibber)),
+        Arc::new(Box::new(price_repository)),
+    );
 
     let router = Router::new()
         .route("/time-slots", get(get_time_slots))
@@ -37,12 +67,18 @@ async fn main() {
 
 #[derive(Clone)]
 struct AppState {
-    api_key: String,
+    db: PgPool,
+    electricity_provider: Arc<Box<dyn ElectricityProvider>>,
+    price_repository: Arc<Box<dyn PriceRepository>>,
 }
 
 impl AppState {
-    fn new(api_key: String) -> Self {
-        Self { api_key }
+    fn new(
+        db: PgPool,
+        electricity_provider: Arc<Box<dyn ElectricityProvider>>,
+        price_repository: Arc<Box<dyn PriceRepository>>,
+    ) -> Self {
+        Self { db, electricity_provider, price_repository }
     }
 }
 
@@ -60,171 +96,167 @@ impl Default for Windows {
     }
 }
 
-async fn get_time_slots(State(state): State<AppState>, windows: Option<Query<Windows>>) -> (StatusCode, Json<Vec<OptimalWindow>>) {
-    let prices = get_prices(&state.api_key).await.unwrap();
+#[instrument]
+async fn has_prices_of_date(db: PgPool, date: NaiveDate) -> Result<bool, String> {
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM prices WHERE moment::date = $1")
+        .bind(date)
+        .fetch_one(&db)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(row.0 > 0)
+}
+
+#[instrument(skip(state))]
+async fn get_time_slots(State(state): State<AppState>, windows: Option<Query<Windows>>) -> axum::response::Result<(StatusCode, Json<Vec<PriceWindow>>)> {
+    if has_prices_of_date(state.db.clone(), Local::now().date_naive()).await.unwrap() {
+        info!("Prices for today already fetched");
+    } else {
+        info!("Prices for today not yet fetched");
+        let prices = state.electricity_provider.fetch_prices().await;
+
+        let persisting_result = match prices {
+            Ok(prices) => state.price_repository.persist_prices(prices).await,
+            Err(_) => return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch prices from provider".to_string()).into())
+        };
+
+        if let Err(e) = persisting_result {
+            error!("Failed to persist prices: {}", e);
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to persist prices".to_string()).into());
+        }
+    }
 
     let durations = windows
         .unwrap_or_default()
         .0
         .durations
         .split(",")
-        .map(|s| s.parse::<usize>().ok())
+        .map(|s| s.parse::<i32>().ok())
         .filter(|o| o.is_some())
         .map(|o| o.unwrap())
-        .collect::<Vec<usize>>();
+        .collect::<Vec<i32>>();
 
-    let optimal_windows = calculate_optimal_windows(prices, durations);
+    let optimal_windows = state.price_repository.fetch_optimal_price_window_of_date_for_durations(Local::now().date_naive(), durations).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    (StatusCode::OK, Json(optimal_windows))
+    Ok((StatusCode::OK, Json(optimal_windows)))
 }
 
 
-#[derive(Debug, Clone, Serialize)]
-struct OptimalWindow {
-    duration: usize,
-    from: DateTime<Local>,
-    to: DateTime<Local>,
-    average_price: String,
-    prices: Vec<PricePoint>,
-}
-
-
-/// Calculate, for a set of hour durations, the optimal window to consume electricity based on
-/// the average price of electricity during that window.
-fn calculate_optimal_windows(prices: Vec<PricePoint>, durations: Vec<usize>) -> Vec<OptimalWindow> {
-    let mut optimal_windows: Vec<OptimalWindow> = vec![];
-
-    for duration in durations {
-        let mut possible_windows: Vec<OptimalWindow> = vec![];
-
-        if prices.len() < duration {
-            continue;
-        }
-
-        info!("Calculating optimal window for a {} hour duration", duration);
-
-        for i in 0..prices.len() {
-            if i + duration >= prices.len() {
-                break;
-            }
-
-            let starting_price_point = &prices[i];
-            let mut total_price_for_window = 0.0;
-
-            for j in 0..duration {
-                if i + j >= prices.len() - 1 {
-                    break;
-                }
-
-                total_price_for_window += prices[i + j].total;
-            }
-
-
-            possible_windows.push(OptimalWindow {
-                duration,
-                from: DateTime::parse_from_rfc3339(&starting_price_point.starts_at).unwrap().with_timezone(&Local),
-                to: DateTime::parse_from_rfc3339(&prices[i + duration - 1].starts_at).unwrap().with_timezone(&Local),
-                average_price: format!("{:.3}", total_price_for_window / duration as f64),
-                prices: prices[i..i + duration].to_vec(),
-            });
-        }
-
-        let min = possible_windows.iter().min_by(|a, b| a.average_price.partial_cmp(&b.average_price).unwrap()).unwrap();
-        optimal_windows.push(min.clone());
-    }
-
-    info!("Calculated {} optimal windows", optimal_windows.len());
-
-    return optimal_windows;
-}
-
-async fn get_prices(api_key: &str) -> reqwest::Result<Vec<PricePoint>> {
-    info!("Fetching prices from tibber");
-
-    let query = r#"{ "query": "{ viewer { homes { currentSubscription { priceInfo { today { total startsAt } }}}}}" }"#;
-
-    let client = Client::new();
-
-    let response = client
-        .post("https://api.tibber.com/v1-beta/gql")
-        .header("Authorization", api_key)
-        .header("Content-Type", "application/json")
-        .body(query)
-        .send()
-        .await?;
-
-    let body = response.text().await?;
-
-    let prices = parse_prices_json(&body);
-
-    info!("Fetched {} prices from tibber", prices.len());
-
-    Ok(prices)
-}
-
-fn parse_prices_json(json: &str) -> Vec<PricePoint> {
-    let data = serde_json::from_str::<Response>(json).expect("Failed to parse tibber's response");
-
-    return data.data.viewer.homes[0].current_subscription.price_info.today.clone();
-}
-
-#[derive(Deserialize, Debug)]
-struct Response {
-    data: Data,
-}
-
-#[derive(Deserialize, Debug)]
-struct Data {
-    viewer: Viewer,
-}
-
-#[derive(Deserialize, Debug)]
-struct Viewer {
-    homes: Vec<Home>,
-}
-
-#[derive(Deserialize, Debug)]
-struct Home {
-    #[serde(rename = "currentSubscription")]
-    current_subscription: CurrentSubscription,
-}
-
-#[derive(Deserialize, Debug)]
-struct CurrentSubscription {
-    #[serde(rename = "priceInfo")]
-    price_info: PriceInfo,
-}
-
-#[derive(Deserialize, Debug)]
-struct PriceInfo {
-    today: Vec<PricePoint>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
+/// A representation of a price starting at a certain moment in time.
+#[derive(Serialize, Debug, Clone, FromRow)]
 struct PricePoint {
-    total: f64,
-    #[serde(rename = "startsAt")]
-    starts_at: String,
+    moment: DateTime<Utc>,
+    monetary_amount: f64,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn test_parse_prices_json() {
-        let json = r#"
-            {"data":{"viewer":{"homes":[{"currentSubscription":{"priceInfo":{"today":[{"total":0.2821,"startsAt":"2024-06-15T00:00:00.000+02:00"},{"total":0.2787,"startsAt":"2024-06-15T01:00:00.000+02:00"},{"total":0.2666,"startsAt":"2024-06-15T02:00:00.000+02:00"},{"total":0.2581,"startsAt":"2024-06-15T03:00:00.000+02:00"},{"total":0.2213,"startsAt":"2024-06-15T04:00:00.000+02:00"},{"total":0.1769,"startsAt":"2024-06-15T05:00:00.000+02:00"},{"total":0.1547,"startsAt":"2024-06-15T06:00:00.000+02:00"},{"total":0.1529,"startsAt":"2024-06-15T07:00:00.000+02:00"},{"total":0.1528,"startsAt":"2024-06-15T08:00:00.000+02:00"},{"total":0.1528,"startsAt":"2024-06-15T09:00:00.000+02:00"},{"total":0.1406,"startsAt":"2024-06-15T10:00:00.000+02:00"},{"total":0.1177,"startsAt":"2024-06-15T11:00:00.000+02:00"},{"total":0.0985,"startsAt":"2024-06-15T12:00:00.000+02:00"},{"total":0.0736,"startsAt":"2024-06-15T13:00:00.000+02:00"},{"total":0.056,"startsAt":"2024-06-15T14:00:00.000+02:00"},{"total":0.0849,"startsAt":"2024-06-15T15:00:00.000+02:00"},{"total":0.1175,"startsAt":"2024-06-15T16:00:00.000+02:00"},{"total":0.1474,"startsAt":"2024-06-15T17:00:00.000+02:00"},{"total":0.1528,"startsAt":"2024-06-15T18:00:00.000+02:00"},{"total":0.1917,"startsAt":"2024-06-15T19:00:00.000+02:00"},{"total":0.2375,"startsAt":"2024-06-15T20:00:00.000+02:00"},{"total":0.2348,"startsAt":"2024-06-15T21:00:00.000+02:00"},{"total":0.2294,"startsAt":"2024-06-15T22:00:00.000+02:00"},{"total":0.2021,"startsAt":"2024-06-15T23:00:00.000+02:00"}]}}}]}}}
-            "#;
+#[derive(Debug, Clone)]
+enum ElectricityProviderError {
+    FetchPrices(String)
+}
 
-        let prices = parse_prices_json(json);
+#[derive(Debug, Clone, Error)]
+enum PriceRepositoryError {
+    #[error("the prices could not be persisted: {0}")]
+    PersistenceError(String),
+}
 
-        assert_eq!(prices.len(), 24);
-        assert_eq!(prices[0].total, 0.2821);
-        assert_eq!(prices[0].starts_at, "2024-06-15T00:00:00.000+02:00");
+#[async_trait]
+trait ElectricityProvider: Send + Sync {
+    async fn fetch_prices(&self) -> Result<Vec<PricePoint>, ElectricityProviderError>;
+}
 
-        assert_eq!(prices[23].total, 0.2021);
-        assert_eq!(prices[23].starts_at, "2024-06-15T23:00:00.000+02:00");
+#[derive(Debug, Clone, FromRow, Serialize)]
+struct PriceWindow {
+    starts_at: NaiveDateTime,
+    ends_at: NaiveDateTime,
+    average_price: String,
+}
+
+#[async_trait]
+trait PriceRepository: Send + Sync {
+    async fn fetch_prices_of_date(&self, date: NaiveDate) -> Result<Vec<PricePoint>, String>;
+
+    async fn persist_prices(&self, prices: Vec<PricePoint>) -> Result<(), PriceRepositoryError>;
+
+    async fn fetch_optimal_price_window_of_date_for_durations(&self, date: NaiveDate, durations: Vec<i32>) -> Result<Vec<PriceWindow>, String>;
+}
+
+#[derive(Clone, Debug)]
+struct PostgresPriceRepository {
+    db: PgPool,
+}
+
+impl PostgresPriceRepository {
+    pub fn new(db: PgPool) -> Self {
+        Self { db }
     }
 }
 
+
+#[async_trait]
+impl PriceRepository for PostgresPriceRepository {
+    async fn fetch_prices_of_date(&self, date: NaiveDate) -> Result<Vec<PricePoint>, String> {
+        let rows = sqlx::query_as::<_, PricePoint>("SELECT moment, monetary_amount FROM prices WHERE moment::date = $1")
+            .bind(date)
+            .fetch_all(&self.db)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(rows)
+    }
+
+    async fn persist_prices(&self, prices: Vec<PricePoint>) -> Result<(), PriceRepositoryError> {
+        info!("Persisting {} prices", prices.len());
+        let mut query_builder = QueryBuilder::new("insert into prices (moment, price)");
+
+        query_builder.push_values(prices, |mut builder, price| {
+            builder
+                .push_bind(price.moment)
+                .push_bind(price.monetary_amount);
+        });
+
+        let query = query_builder.build();
+
+        query
+            .execute(&self.db)
+            .await
+            .map(|_| ())
+            .map_err(|e| PriceRepositoryError::PersistenceError(e.to_string()))
+    }
+
+    #[instrument]
+    async fn fetch_optimal_price_window_of_date_for_durations(&self, date: NaiveDate, durations: Vec<i32>) -> Result<Vec<PriceWindow>, String> {
+
+        let mut windows: Vec<PriceWindow> = Vec::new();
+
+        for mut duration in durations {
+
+            duration = duration - 1;
+            duration = duration.clamp(0, 23);
+
+            let row = sqlx::query_as::<_, PriceWindow>(r#"
+            select moment                                                               as starts_at,
+            round((avg(prices.price) over price_window)::numeric, 3)::varchar                    as average_price,
+            ((max(moment) over price_window) + interval '1 hour' - interval '1 second') as ends_at
+            from prices
+            where moment::date = $1
+            window price_window as ( partition by moment::date order by moment rows between current row and $2 following )
+            order by average_price
+            limit 1
+            "#
+            )
+                .bind(date)
+                .bind(duration)
+                .fetch_one(&self.db)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            windows.push(row)
+        }
+
+
+        Ok(windows)
+    }
+}
