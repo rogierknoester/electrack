@@ -2,17 +2,15 @@ use std::sync::Arc;
 
 use axum::{async_trait, Json, Router, serve};
 use axum::extract::{Query, State};
-use axum::response::IntoResponse;
 use axum::routing::get;
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, Utc};
 use log::{error, info};
 use reqwest::StatusCode;
 use serde_derive::{Deserialize, Serialize};
-use sqlx::{Error, FromRow, PgPool, QueryBuilder};
-use sqlx::postgres::{PgPoolOptions, PgRow};
+use sqlx::{FromRow, PgPool, QueryBuilder};
+use sqlx::postgres::{PgPoolOptions};
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
 use tracing::instrument;
 use tracing_subscriber::fmt::format::FmtSpan;
 

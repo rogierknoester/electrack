@@ -1,9 +1,8 @@
 use axum::async_trait;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Utc};
 use log::info;
 use reqwest::Client;
 use serde_derive::{Deserialize, Serialize};
-use tracing::instrument;
 
 use crate::{ElectricityProvider, ElectricityProviderError, PricePoint};
 
