@@ -1,10 +1,11 @@
 use axum::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use log::info;
 use reqwest::Client;
 use serde_derive::{Deserialize, Serialize};
 
 use crate::{ElectricityProvider, ElectricityProviderError, PricePoint};
+use crate::nordpool::NordpoolPrice;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Tibber {
@@ -20,11 +21,15 @@ impl Tibber {
 
 #[async_trait]
 impl ElectricityProvider for Tibber {
+    fn name(&self) -> &'static str {
+        "tibber"
+    }
+
     async fn fetch_prices(&self) -> Result<Vec<PricePoint>, ElectricityProviderError> {
         get_prices(&self.api_key)
             .await
             .map_err(|e| ElectricityProviderError::FetchPrices(e.to_string()))
-            .and_then(|prices| prices.into_iter().map(PricePoint::try_from).collect::<Result<Vec<PricePoint>, ElectricityProviderError>>())
+            .map(|prices| prices.into_iter().map(PricePoint::from).collect::<Vec<PricePoint>>())
     }
 }
 
@@ -95,21 +100,15 @@ struct PriceInfo {
 struct TibberPricePoint {
     total: f64,
     #[serde(rename = "startsAt")]
-    starts_at: String,
+    starts_at: DateTime<Utc>,
 }
 
-
-impl TryFrom<TibberPricePoint> for PricePoint {
-    type Error = ElectricityProviderError;
-
-    fn try_from(value: TibberPricePoint) -> Result<Self, Self::Error> {
-        DateTime::parse_from_rfc3339(value.starts_at.as_str())
-            .map_err(|e| ElectricityProviderError::FetchPrices(e.to_string()))
-            .map(|dt| dt.with_timezone(&Utc))
-            .map(|dt| PricePoint {
-                monetary_amount: value.total,
-                moment: dt,
-            })
+impl From<TibberPricePoint> for PricePoint {
+    fn from(value: TibberPricePoint) -> PricePoint {
+        PricePoint {
+            moment: value.starts_at.with_timezone(&Utc),
+            monetary_amount: value.total,
+        }
     }
 }
 
@@ -127,9 +126,9 @@ mod tests {
 
         assert_eq!(prices.len(), 24);
         assert_eq!(prices[0].total, 0.2821);
-        assert_eq!(prices[0].starts_at, "2024-06-15T00:00:00.000+02:00");
+        assert_eq!(prices[0].starts_at, DateTime::parse_from_rfc3339("2024-06-14T22:00:00.000+00:00").unwrap());
 
         assert_eq!(prices[23].total, 0.2021);
-        assert_eq!(prices[23].starts_at, "2024-06-15T23:00:00.000+02:00");
+        assert_eq!(prices[23].starts_at, DateTime::parse_from_rfc3339("2024-06-15T21:00:00.000+00:00").unwrap());
     }
 }

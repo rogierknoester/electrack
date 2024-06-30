@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-chrono = { version = "0.4.38", features = ["default", "serde"] }
+chrono = { version = "0.4.38", features = ["serde"] }
+chrono-tz = { version = "0.9.0", features = ["serde"] }
 log = "0.4.21"
 reqwest = { version = "0.12.4", features = ["default", "json"] }
 serde = { version = "1.0.203" , features = ["std", "derive"] }
@@ -18,3 +19,4 @@ url = "2.5.1"
 axum = { version = "0.7.5", features = ["default"] }
 sqlx = { version = "0.7.4" , features = ["postgres", "runtime-tokio", "sqlx-postgres", "chrono"]}
 rusty-money = "^0.4.1"
+axum-macros = "0.4.1"
