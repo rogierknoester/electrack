@@ -1,23 +1,20 @@
-use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::{async_trait, Json, Router, serve};
 use axum::extract::{Query, State};
 use axum::routing::get;
 use axum_macros::debug_handler;
-use chrono::{DateTime, Duration, FixedOffset, Local, NaiveDate, NaiveTime, Timelike, TimeZone, Utc};
-use chrono_tz::{Tz, TZ_VARIANTS};
+use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone, Utc};
 use log::{error, info};
 use reqwest::StatusCode;
 use serde_derive::{Deserialize, Serialize};
-use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, Row};
+use sqlx::{FromRow, PgPool, QueryBuilder, Row};
 use sqlx::migrate::Migrator;
-use sqlx::postgres::{PgPoolOptions, PgRow};
+use sqlx::postgres::{PgPoolOptions};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tracing::instrument;
 use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::fmt::time;
 
 mod tibber;
 mod nordpool;

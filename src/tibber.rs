@@ -1,11 +1,11 @@
 use axum::async_trait;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::DateTime;
+use chrono::Utc;
 use log::info;
 use reqwest::Client;
 use serde_derive::{Deserialize, Serialize};
 
 use crate::{ElectricityProvider, ElectricityProviderError, PricePoint};
-use crate::nordpool::NordpoolPrice;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Tibber {
@@ -18,7 +18,6 @@ impl Tibber {
     }
 }
 
-
 #[async_trait]
 impl ElectricityProvider for Tibber {
     fn name(&self) -> &'static str {
@@ -29,7 +28,12 @@ impl ElectricityProvider for Tibber {
         get_prices(&self.api_key)
             .await
             .map_err(|e| ElectricityProviderError::FetchPrices(e.to_string()))
-            .map(|prices| prices.into_iter().map(PricePoint::from).collect::<Vec<PricePoint>>())
+            .map(|prices| {
+                prices
+                    .into_iter()
+                    .map(PricePoint::from)
+                    .collect::<Vec<PricePoint>>()
+            })
     }
 }
 
@@ -60,9 +64,12 @@ async fn get_prices(api_key: &str) -> reqwest::Result<Vec<TibberPricePoint>> {
 fn parse_prices_json(json: &str) -> Vec<TibberPricePoint> {
     let data = serde_json::from_str::<Response>(json).expect("Failed to parse tibber's response");
 
-    return data.data.viewer.homes[0].current_subscription.price_info.today.clone();
+    return data.data.viewer.homes[0]
+        .current_subscription
+        .price_info
+        .today
+        .clone();
 }
-
 
 #[derive(Deserialize, Debug)]
 struct Response {
@@ -126,9 +133,16 @@ mod tests {
 
         assert_eq!(prices.len(), 24);
         assert_eq!(prices[0].total, 0.2821);
-        assert_eq!(prices[0].starts_at, DateTime::parse_from_rfc3339("2024-06-14T22:00:00.000+00:00").unwrap());
+        assert_eq!(
+            prices[0].starts_at,
+            DateTime::parse_from_rfc3339("2024-06-14T22:00:00.000+00:00").unwrap()
+        );
 
         assert_eq!(prices[23].total, 0.2021);
-        assert_eq!(prices[23].starts_at, DateTime::parse_from_rfc3339("2024-06-15T21:00:00.000+00:00").unwrap());
+        assert_eq!(
+            prices[23].starts_at,
+            DateTime::parse_from_rfc3339("2024-06-15T21:00:00.000+00:00").unwrap()
+        );
     }
 }
+
