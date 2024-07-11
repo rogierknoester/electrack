@@ -1,23 +1,23 @@
 use std::sync::Arc;
 
-use axum::{async_trait, Json, Router, serve};
 use axum::extract::{Query, State};
 use axum::routing::get;
+use axum::{async_trait, serve, Json, Router};
 use axum_macros::debug_handler;
 use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone, Utc};
 use log::{error, info};
 use reqwest::StatusCode;
 use serde_derive::{Deserialize, Serialize};
-use sqlx::{FromRow, PgPool, QueryBuilder, Row};
 use sqlx::migrate::Migrator;
-use sqlx::postgres::{PgPoolOptions};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{FromRow, PgPool, QueryBuilder, Row};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tracing::instrument;
 use tracing_subscriber::fmt::format::FmtSpan;
 
-mod tibber;
 mod nordpool;
+mod tibber;
 
 const APP_NAME: &str = "electricity-price-optimiser";
 
@@ -39,22 +39,18 @@ async fn main() {
 
     let db_pool = setup_db(&db_dsn).await;
 
-
     let tibber = tibber::Tibber::new(api_key.clone());
     let price_repository = PostgresPriceRepository::new(db_pool.clone());
 
-    let app_state = AppState::new(
-        db_pool,
-        Arc::new(tibber),
-        Arc::new(price_repository),
-    );
+    let app_state = AppState::new(db_pool, Arc::new(tibber), Arc::new(price_repository));
 
     let router = Router::new()
         .route("/time-slots", get(get_time_slots))
-        .with_state(app_state.clone())
-        ;
+        .with_state(app_state.clone());
 
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await.unwrap();
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
+        .await
+        .unwrap();
 
     info!("Now listening on port {}", port);
 
@@ -88,10 +84,13 @@ impl AppState {
         electricity_provider: Arc<dyn ElectricityProvider>,
         price_repository: Arc<dyn PriceRepository>,
     ) -> Self {
-        Self { db, electricity_provider, price_repository }
+        Self {
+            db,
+            electricity_provider,
+            price_repository,
+        }
     }
 }
-
 
 #[derive(Debug, Clone, Deserialize)]
 struct TimeslotParameters {
@@ -115,8 +114,14 @@ impl Default for TimeslotParameters {
     fn default() -> Self {
         Self {
             durations: "".to_string(),
-            moment_start: Utc::now().with_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap()).unwrap().fixed_offset(),
-            moment_end: Utc::now().with_time(NaiveTime::from_hms_opt(23, 59, 59).unwrap()).unwrap().fixed_offset(),
+            moment_start: Utc::now()
+                .with_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+                .unwrap()
+                .fixed_offset(),
+            moment_end: Utc::now()
+                .with_time(NaiveTime::from_hms_opt(23, 59, 59).unwrap())
+                .unwrap()
+                .fixed_offset(),
         }
     }
 }
@@ -132,12 +137,19 @@ async fn has_prices_of_date(db: PgPool, date: NaiveDate) -> Result<bool, String>
 }
 
 #[debug_handler(state = AppState)]
-async fn get_time_slots(State(state): State<AppState>, parameters: Query<TimeslotParameters>) -> axum::response::Result<(StatusCode, Json<Vec<PriceWindow>>)> {
-    if !has_prices_of_date(state.db.clone(), Local::now().date_naive()).await.unwrap() {
+async fn get_time_slots(
+    State(state): State<AppState>,
+    parameters: Query<TimeslotParameters>,
+) -> axum::response::Result<(StatusCode, Json<Vec<PriceWindow>>)> {
+    if !has_prices_of_date(state.db.clone(), Local::now().date_naive())
+        .await
+        .unwrap()
+    {
         let price_fetching_result = fetch_prices_of_today_from_provider(
             &*state.electricity_provider,
             &*state.price_repository,
-        ).await;
+        )
+        .await;
 
         if let Err(e) = price_fetching_result {
             return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into());
@@ -148,26 +160,39 @@ async fn get_time_slots(State(state): State<AppState>, parameters: Query<Timeslo
 
     let timezone_date_start = parameters.moment_start.timezone();
 
-    let optimal_windows: Vec<PriceWindow> = state.price_repository
-        .fetch_optimal_price_window_of_window_for_durations(parameters.moment_start.to_utc(), parameters.moment_end.to_utc(), durations.as_slice())
+    let optimal_windows: Vec<PriceWindow> = state
+        .price_repository
+        .fetch_optimal_price_window_of_window_for_durations(
+            parameters.moment_start.to_utc(),
+            parameters.moment_end.to_utc(),
+            durations.as_slice(),
+        )
         .await
-        .map(|windows| windows.into_iter().map(|window| window.with_timezone(timezone_date_start)).collect::<Vec<PriceWindow>>())
+        .map(|windows| {
+            windows
+                .into_iter()
+                .map(|window| window.with_timezone(timezone_date_start))
+                .collect::<Vec<PriceWindow>>()
+        })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok((StatusCode::OK, Json(optimal_windows)))
 }
 
-
 /// Fetch the prices of the provider for the current day
-async fn fetch_prices_of_today_from_provider(electricity_provider: &dyn ElectricityProvider, price_repository: &dyn PriceRepository) -> Result<Vec<PricePoint>, ElectricityProviderError> {
+async fn fetch_prices_of_today_from_provider(
+    electricity_provider: &dyn ElectricityProvider,
+    price_repository: &dyn PriceRepository,
+) -> Result<Vec<PricePoint>, ElectricityProviderError> {
     info!("Prices for today not yet fetched");
     let fetch_result = electricity_provider.fetch_prices().await;
-
 
     let persisting_result = match fetch_result {
         Ok(fetched_prices) => {
             info!("Fetched {} prices", fetched_prices.len());
-            price_repository.persist_prices(&fetched_prices, electricity_provider.name()).await
+            price_repository
+                .persist_prices(&fetched_prices, electricity_provider.name())
+                .await
                 .and(Ok(fetched_prices))
         }
         Err(error) => {
@@ -185,7 +210,6 @@ async fn fetch_prices_of_today_from_provider(electricity_provider: &dyn Electric
     }
 }
 
-
 /// A representation of a price starting at a certain moment in time.
 #[derive(Serialize, Debug, Clone, FromRow)]
 struct PricePoint {
@@ -193,11 +217,10 @@ struct PricePoint {
     monetary_amount: f64,
 }
 
-
 #[derive(Debug, Clone, Error)]
 enum ElectricityProviderError {
     #[error("failed to fetch prices: {0}")]
-    FetchPrices(String)
+    FetchPrices(String),
 }
 
 #[derive(Debug, Clone, Error)]
@@ -234,9 +257,18 @@ impl PriceWindow {
 trait PriceRepository: Send + Sync {
     async fn fetch_prices_of_date(&self, date: NaiveDate) -> Result<Vec<PricePoint>, String>;
 
-    async fn persist_prices(&self, prices: &[PricePoint], provider_name: &str) -> Result<(), PriceRepositoryError>;
+    async fn persist_prices(
+        &self,
+        prices: &[PricePoint],
+        provider_name: &str,
+    ) -> Result<(), PriceRepositoryError>;
 
-    async fn fetch_optimal_price_window_of_window_for_durations(&self, start_moment: DateTime<Utc>, end_moment: DateTime<Utc>, durations: &[i32]) -> Result<Vec<PriceWindow>, String>;
+    async fn fetch_optimal_price_window_of_window_for_durations(
+        &self,
+        start_moment: DateTime<Utc>,
+        end_moment: DateTime<Utc>,
+        durations: &[i32],
+    ) -> Result<Vec<PriceWindow>, String>;
 }
 
 #[derive(Clone, Debug)]
@@ -250,37 +282,42 @@ impl PostgresPriceRepository {
     }
 }
 
-
 #[async_trait]
 impl PriceRepository for PostgresPriceRepository {
     async fn fetch_prices_of_date(&self, date: NaiveDate) -> Result<Vec<PricePoint>, String> {
-        let rows = sqlx::query_as::<_, PricePoint>("SELECT moment, monetary_amount FROM prices WHERE moment::date = $1")
-            .bind(date)
-            .fetch_all(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
+        let rows = sqlx::query_as::<_, PricePoint>(
+            "SELECT moment, monetary_amount FROM prices WHERE moment::date = $1",
+        )
+        .bind(date)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| e.to_string())?;
 
         Ok(rows)
     }
 
-    async fn persist_prices(&self, prices: &[PricePoint], provider_name: &str) -> Result<(), PriceRepositoryError> {
+    async fn persist_prices(
+        &self,
+        prices: &[PricePoint],
+        provider_name: &str,
+    ) -> Result<(), PriceRepositoryError> {
         info!("Persisting {} prices", prices.len());
 
-        let provider: Provider = sqlx::query_as("select id, name from providers where name = $1 limit 1")
-            .bind(provider_name)
-            .fetch_one(&self.db)
-            .await
-            .map_err(|e| PriceRepositoryError::PersistenceError(e.to_string()))?;
+        let provider: Provider =
+            sqlx::query_as("select id, name from providers where name = $1 limit 1")
+                .bind(provider_name)
+                .fetch_one(&self.db)
+                .await
+                .map_err(|e| PriceRepositoryError::PersistenceError(e.to_string()))?;
 
-
-        let mut query_builder = QueryBuilder::new("insert into prices (moment, price, provider_id)");
+        let mut query_builder =
+            QueryBuilder::new("insert into prices (moment, price, provider_id)");
 
         query_builder.push_values(prices, |mut builder, price| {
             builder
                 .push_bind(price.moment)
                 .push_bind(price.monetary_amount)
-                .push_bind(provider.id)
-            ;
+                .push_bind(provider.id);
         });
 
         let query = query_builder.build();
@@ -293,7 +330,12 @@ impl PriceRepository for PostgresPriceRepository {
     }
 
     #[instrument(skip(self))]
-    async fn fetch_optimal_price_window_of_window_for_durations(&self, start_moment: DateTime<Utc>, end_moment: DateTime<Utc>, durations: &[i32]) -> Result<Vec<PriceWindow>, String> {
+    async fn fetch_optimal_price_window_of_window_for_durations(
+        &self,
+        start_moment: DateTime<Utc>,
+        end_moment: DateTime<Utc>,
+        durations: &[i32],
+    ) -> Result<Vec<PriceWindow>, String> {
         let mut windows: Vec<PriceWindow> = Vec::new();
 
         for duration in durations.into_iter() {
@@ -301,7 +343,6 @@ impl PriceRepository for PostgresPriceRepository {
 
             duration = duration - 1;
             duration = duration.clamp(0, 23);
-
 
             let row = sqlx::query_as::<_, PriceWindow>(r#"
             select moment                                                                        as starts_at,
