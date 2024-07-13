@@ -1,11 +1,13 @@
 [package]
-name = "electricity-price-optimiser"
+name = "electrack"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 chrono = { version = "0.4.38", features = ["serde"] }
 chrono-tz = { version = "0.9.0", features = ["serde"] }
+dotenv = { version="^0.15.0"}
+dsn = {version="^1.0.2"}
 log = "0.4.21"
 reqwest = { version = "0.12.4", features = ["default", "json"] }
 serde = { version = "1.0.203" , features = ["std", "derive"] }

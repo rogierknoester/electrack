@@ -1,3 +1,5 @@
+use core::panic;
+use std::process;
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
@@ -5,12 +7,12 @@ use axum::routing::get;
 use axum::{async_trait, serve, Json, Router};
 use axum_macros::debug_handler;
 use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone, Utc};
-use log::{error, info};
+use log::{debug, error, info};
 use reqwest::StatusCode;
 use serde_derive::{Deserialize, Serialize};
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{FromRow, PgPool, QueryBuilder, Row};
+use sqlx::{FromRow, PgPool, QueryBuilder};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tracing::instrument;
@@ -19,7 +21,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 mod nordpool;
 mod tibber;
 
-const APP_NAME: &str = "electricity-price-optimiser";
+const APP_NAME: &str = "electrack";
 
 static MIGRATOR: Migrator = sqlx::migrate!();
 
@@ -30,19 +32,26 @@ async fn main() {
         .with_span_events(FmtSpan::CLOSE)
         .init();
 
-    info!("Starting {}", APP_NAME);
+    info!("starting {}", APP_NAME);
 
-    let api_key = std::env::var("TIBBER_API_KEY").expect("TIBBER_API_KEY must be set");
+    dotenv::dotenv().ok();
+
+    let electricity_provider_dsn = std::env::var("ELECTRICITY_PRICE_PROVIDER_DSN")
+        .expect("ELECTRICITY_PRICE_PROVIDER_DSN is missing, you need to configure it");
     let port = std::env::var("PORT").unwrap_or("8080".to_string());
 
-    let db_dsn = std::env::var("DATABASE_URL").expect("DB_URL must be set");
+    let db_dsn = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
     let db_pool = setup_db(&db_dsn).await;
 
-    let tibber = tibber::Tibber::new(api_key.clone());
     let price_repository = PostgresPriceRepository::new(db_pool.clone());
 
-    let app_state = AppState::new(db_pool, Arc::new(tibber), Arc::new(price_repository));
+    let electricity_provider = resolve_electricity_provider(electricity_provider_dsn.as_str());
+    let app_state = AppState::new(
+        db_pool,
+        Arc::new(electricity_provider),
+        Arc::new(price_repository),
+    );
 
     let router = Router::new()
         .route("/time-slots", get(get_time_slots))
@@ -52,11 +61,30 @@ async fn main() {
         .await
         .unwrap();
 
-    info!("Now listening on port {}", port);
+    info!("now listening on port {}", port);
 
     serve(listener, router).await.unwrap();
 
-    info!("Shutting down {}", APP_NAME);
+    info!("shutting down {}", APP_NAME);
+}
+
+/// Build an `ElectricityProvider` instance from the provided instance, if supported
+fn resolve_electricity_provider(dsn: &str) -> impl ElectricityPriceProvider {
+    let dsn = dsn::parse(dsn).unwrap_or_else(|e| {
+        error!("unable to parse ELECTRICITY_PRICE_PROVIDER_DSN, {}", e);
+        process::exit(1);
+    });
+
+    debug!("trying to resolve provider \"{}\"", dsn.driver);
+    return match dsn.driver.as_str() {
+        "tibber" => tibber::Tibber::new(
+            dsn.username
+                .expect("cannot create a tibber instance from the provided dsn"),
+        ),
+        _ => panic!(
+            "the provided ELECTRICITY_PRICE_PROVIDER_DSN does not match any supported provider"
+        ),
+    };
 }
 
 async fn setup_db(db_dsn: &str) -> PgPool {
@@ -64,9 +92,9 @@ async fn setup_db(db_dsn: &str) -> PgPool {
         .max_connections(5)
         .connect(&db_dsn)
         .await
-        .expect("Failed to create database pool");
+        .expect("failed to create database pool");
 
-    MIGRATOR.run(&pool).await.expect("Failed to run migrations");
+    MIGRATOR.run(&pool).await.expect("failed to run migrations");
 
     pool
 }
@@ -74,14 +102,14 @@ async fn setup_db(db_dsn: &str) -> PgPool {
 #[derive(Clone)]
 struct AppState {
     db: PgPool,
-    electricity_provider: Arc<dyn ElectricityProvider>,
+    electricity_provider: Arc<dyn ElectricityPriceProvider>,
     price_repository: Arc<dyn PriceRepository>,
 }
 
 impl AppState {
     fn new(
         db: PgPool,
-        electricity_provider: Arc<dyn ElectricityProvider>,
+        electricity_provider: Arc<dyn ElectricityPriceProvider>,
         price_repository: Arc<dyn PriceRepository>,
     ) -> Self {
         Self {
@@ -181,10 +209,10 @@ async fn get_time_slots(
 
 /// Fetch the prices of the provider for the current day
 async fn fetch_prices_of_today_from_provider(
-    electricity_provider: &dyn ElectricityProvider,
+    electricity_provider: &dyn ElectricityPriceProvider,
     price_repository: &dyn PriceRepository,
 ) -> Result<Vec<PricePoint>, ElectricityProviderError> {
-    info!("Prices for today not yet fetched");
+    info!("prices for today not yet fetched");
     let fetch_result = electricity_provider.fetch_prices().await;
 
     let persisting_result = match fetch_result {
@@ -230,7 +258,7 @@ enum PriceRepositoryError {
 }
 
 #[async_trait]
-trait ElectricityProvider: Send + Sync {
+trait ElectricityPriceProvider: Send + Sync {
     fn name(&self) -> &'static str;
 
     async fn fetch_prices(&self) -> Result<Vec<PricePoint>, ElectricityProviderError>;
@@ -301,14 +329,14 @@ impl PriceRepository for PostgresPriceRepository {
         prices: &[PricePoint],
         provider_name: &str,
     ) -> Result<(), PriceRepositoryError> {
-        info!("Persisting {} prices", prices.len());
-
         let provider: Provider =
             sqlx::query_as("select id, name from providers where name = $1 limit 1")
                 .bind(provider_name)
                 .fetch_one(&self.db)
                 .await
                 .map_err(|e| PriceRepositoryError::PersistenceError(e.to_string()))?;
+
+        info!("Persisting {} prices for {}", prices.len(), provider.name);
 
         let mut query_builder =
             QueryBuilder::new("insert into prices (moment, price, provider_id)");

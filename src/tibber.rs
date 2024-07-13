@@ -5,7 +5,7 @@ use log::info;
 use reqwest::Client;
 use serde_derive::{Deserialize, Serialize};
 
-use crate::{ElectricityProvider, ElectricityProviderError, PricePoint};
+use crate::{ElectricityPriceProvider, ElectricityProviderError, PricePoint};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Tibber {
@@ -19,7 +19,7 @@ impl Tibber {
 }
 
 #[async_trait]
-impl ElectricityProvider for Tibber {
+impl ElectricityPriceProvider for Tibber {
     fn name(&self) -> &'static str {
         "tibber"
     }
