@@ -5,7 +5,9 @@ use log::info;
 use reqwest::Client;
 use serde_derive::{Deserialize, Serialize};
 
-use crate::{ElectricityPriceProvider, ElectricityProviderError, PricePoint};
+use crate::domain::ElectricityPriceProvider;
+use crate::domain::ElectricityProviderError;
+use crate::domain::PricePoint;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Tibber {
