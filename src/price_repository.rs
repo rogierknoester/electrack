@@ -1,5 +1,5 @@
 use axum::async_trait;
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Timelike, Utc};
 use sqlx::{FromRow, PgPool, QueryBuilder};
 use thiserror::Error;
 use tracing::{error, info, instrument};
@@ -29,10 +29,7 @@ pub(crate) trait PriceRepository: Send + Sync {
         durations: &[i32],
     ) -> Result<Vec<PriceWindow>, String>;
 
-    async fn fetch_optimal_upcoming_window(
-        &self,
-        duration: i32,
-    ) -> Result<Vec<PriceWindow>, String>;
+    async fn fetch_optimal_upcoming_window(&self, duration: i32) -> Result<PriceWindow, String>;
 }
 
 #[derive(Clone, Debug)]
@@ -132,30 +129,27 @@ impl PriceRepository for PostgresPriceRepository {
         Ok(windows)
     }
 
-    async fn fetch_optimal_upcoming_window(
-        &self,
-        duration: i32,
-    ) -> Result<Vec<PriceWindow>, String> {
+    async fn fetch_optimal_upcoming_window(&self, duration: i32) -> Result<PriceWindow, String> {
         let duration = duration.clamp(0, 23);
 
-        let _row = sqlx::query_as::<_, PriceWindow>(r#"
+        let price_window = sqlx::query_as::<_, PriceWindow>(r#"
             select moment                                                                        as starts_at,
             round((avg(prices.price) over price_window)::numeric, 3)::varchar                    as average_price,
             ((max(moment) over price_window) + interval '59 minutes 59 seconds') as ends_at
             from prices
-            where moment::timestamptz >= $1 and moment::timestamptz <= $2
-            window price_window as ( partition by moment::date order by moment rows between current row and $3 following )
+            where moment::timestamptz >= $1 
+            window price_window as ( partition by moment::date order by moment rows between current row and $2 following )
             order by average_price
             limit 1
             "#
             )
-                .bind(Utc::now())
+                .bind(Utc::now().with_minute(0).unwrap().with_second(0).unwrap())
                 .bind(duration)
                 .fetch_one(&self.db)
                 .await
                 .map_err(|e| e.to_string())?;
 
-        return Ok(vec![]);
+        return Ok(price_window);
     }
 }
 

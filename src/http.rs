@@ -26,6 +26,7 @@ use crate::{
 pub(crate) async fn start_http_server() -> Result<(), std::io::Error> {
     let router = Router::new()
         .route("/time-slots", get(get_time_slots))
+        .route("/upcoming", get(get_upcoming_windows))
         .with_state(setup_app_state().await);
 
     let port = std::env::var("PORT").unwrap_or("8080".to_string());
@@ -127,6 +128,7 @@ async fn has_prices_of_date(db: PgPool, date: NaiveDate) -> Result<bool, String>
 }
 
 /// Fetch the prices of the provider for the current day
+/// @todo move into provider itself
 async fn fetch_prices_of_today_from_provider(
     electricity_provider: &dyn ElectricityPriceProvider,
     price_repository: &dyn PriceRepository,
@@ -155,4 +157,59 @@ async fn fetch_prices_of_today_from_provider(
             Err(ElectricityProviderError::FetchPrices(error.to_string()))
         }
     }
+}
+
+/// The query parameters for the `/upcoming` endpoint.
+/// Contains only the requested durations
+#[derive(Debug, Clone, Deserialize)]
+struct UpcomingParameters {
+    durations: String,
+}
+
+impl UpcomingParameters {
+    fn get_durations(&self) -> Vec<i32> {
+        self.durations
+            .split(',')
+            .filter_map(|s| s.parse::<i32>().ok())
+            .collect::<Vec<i32>>()
+    }
+}
+
+/// The route to fetch (multiple) upcoming windows.
+async fn get_upcoming_windows(
+    State(state): State<AppState>,
+    parameters: Query<UpcomingParameters>,
+) -> axum::response::Result<(StatusCode, Json<Vec<PriceWindow>>)> {
+    if !has_prices_of_date(state.db.clone(), Local::now().date_naive())
+        .await
+        .unwrap()
+    {
+        let price_fetching_result = fetch_prices_of_today_from_provider(
+            &*state.electricity_provider,
+            &*state.price_repository,
+        )
+        .await;
+
+        if let Err(e) = price_fetching_result {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into());
+        }
+    }
+
+    let durations = parameters.get_durations();
+
+    let mut windows: Vec<PriceWindow> = vec![];
+
+    for duration in durations.iter() {
+        let found_window = state
+            .price_repository
+            .fetch_optimal_upcoming_window(duration.to_owned())
+            .await;
+
+        match found_window {
+            Ok(window) => windows.push(window),
+            Err(error) => error!("cannot find window for duration of {}. {}", duration, error),
+        };
+    }
+
+    Ok((StatusCode::OK, Json(windows)))
 }

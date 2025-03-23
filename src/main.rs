@@ -1,11 +1,5 @@
-use axum::async_trait;
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime, TimeZone, Utc};
-use domain::PricePoint;
-use log::{error, info};
+use log::info;
 use price_repository::PriceRepository;
-use serde_derive::{Deserialize, Serialize};
-use sqlx::PgPool;
-use thiserror::Error;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 use crate::http::start_http_server;
