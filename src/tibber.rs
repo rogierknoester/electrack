@@ -1,13 +1,23 @@
+use std::sync::Arc;
+use std::time::Duration;
+
 use axum::async_trait;
 use chrono::DateTime;
+use chrono::Local;
 use chrono::Utc;
 use log::info;
 use reqwest::Client;
 use serde_derive::{Deserialize, Serialize};
+use tokio::task::JoinHandle;
+use tokio::time::sleep;
+use tracing::error;
 
 use crate::domain::ElectricityPriceProvider;
 use crate::domain::ElectricityProviderError;
 use crate::domain::PricePoint;
+use crate::PriceRepository;
+
+const TIBBER_NAME: &str = "tibber";
 
 #[derive(Clone, Debug)]
 pub(crate) struct Tibber {
@@ -22,27 +32,102 @@ impl Tibber {
 
 #[async_trait]
 impl ElectricityPriceProvider for Tibber {
-    fn name(&self) -> &'static str {
-        "tibber"
-    }
-
-    async fn fetch_prices(&self) -> Result<Vec<PricePoint>, ElectricityProviderError> {
-        get_prices(&self.api_key)
-            .await
-            .map_err(|e| ElectricityProviderError::FetchPrices(e.to_string()))
-            .map(|prices| {
-                prices
-                    .into_iter()
-                    .map(PricePoint::from)
-                    .collect::<Vec<PricePoint>>()
-            })
+    async fn monitor_prices(&self, price_repository: Arc<dyn PriceRepository>) -> JoinHandle<()> {
+        monitor_tibber_prices(&self.api_key, price_repository)
     }
 }
 
-async fn get_prices(api_key: &str) -> reqwest::Result<Vec<TibberPricePoint>> {
+fn monitor_tibber_prices(
+    api_key: &str,
+    price_repository: Arc<dyn PriceRepository>,
+) -> JoinHandle<()> {
+    let api_key = api_key.to_owned();
+    let price_repository = price_repository.clone();
+    tokio::task::spawn(async move {
+        loop {
+            let today = Local::now().date_naive();
+            let tomorrow = today + chrono::Duration::days(1);
+
+            if !price_repository
+                .has_prices_of_date(today)
+                .await
+                .unwrap_or(false)
+            {
+                info!("prices for today have not been fetched yet, doing that now");
+                match fetch_prices_for_moment(api_key.as_str(), Moment::Today).await {
+                    Ok(fetched_prices) => {
+                        match price_repository
+                            .persist_prices(&fetched_prices, TIBBER_NAME)
+                            .await
+                        {
+                            Ok(_) => info!("fetched and persisted prices for today for tibber"),
+                            Err(err) => error!("unable to persist prices: {}", err),
+                        }
+                    }
+                    Err(error) => error!("unable to fetch prices: {}", error),
+                };
+            }
+            if !price_repository
+                .has_prices_of_date(tomorrow)
+                .await
+                .unwrap_or(false)
+            {
+                info!("prices for tomorrow have not been fetched yet, doing that now");
+                match fetch_prices_for_moment(api_key.as_str(), Moment::Tomorrow).await {
+                    Ok(fetched_prices) => {
+                        match price_repository
+                            .persist_prices(&fetched_prices, TIBBER_NAME)
+                            .await
+                        {
+                            Ok(_) => info!("fetched and persisted prices for tomorrow for tibber"),
+                            Err(err) => error!("unable to persist prices: {}", err),
+                        }
+                    }
+                    Err(error) => error!("unable to fetch prices: {}", error),
+                };
+            }
+
+            // Let's check again in an 30 minutes
+            sleep(Duration::from_secs(1800)).await;
+        }
+    })
+}
+
+const TODAY: &str = r#"{ "query": "{ viewer { homes { currentSubscription { priceInfo { prices: today { total startsAt }  }}}}}" }"#;
+const TOMORROW: &str = r#"{ "query": "{ viewer { homes { currentSubscription { priceInfo { prices: tomorrow { total startsAt } }}}}}" }"#;
+
+enum Moment {
+    Today,
+    Tomorrow,
+}
+
+/// Fetch the prices for either today or tomorrow
+async fn fetch_prices_for_moment(
+    api_key: &str,
+    moment: Moment,
+) -> Result<Vec<PricePoint>, ElectricityProviderError> {
+    fetch_tibber_prices(api_key, moment)
+        .await
+        .map_err(|e| ElectricityProviderError::FetchPrices(e.to_string()))
+        .map(|prices| {
+            prices
+                .into_iter()
+                .map(PricePoint::from)
+                .collect::<Vec<PricePoint>>()
+        })
+}
+
+/// Actually fetch the prices from Tibber's api and return their data structure
+async fn fetch_tibber_prices(
+    api_key: &str,
+    moment: Moment,
+) -> reqwest::Result<Vec<TibberPricePoint>> {
     info!("Fetching prices from tibber");
 
-    let query = r#"{ "query": "{ viewer { homes { currentSubscription { priceInfo { today { total startsAt } }}}}}" }"#;
+    let query = match moment {
+        Moment::Today => TODAY,
+        Moment::Tomorrow => TOMORROW,
+    };
 
     let client = Client::new();
 
@@ -50,7 +135,7 @@ async fn get_prices(api_key: &str) -> reqwest::Result<Vec<TibberPricePoint>> {
         .post("https://api.tibber.com/v1-beta/gql")
         .header("Authorization", api_key)
         .header("Content-Type", "application/json")
-        .body(query)
+        .body(query.to_owned())
         .send()
         .await?;
 
@@ -66,11 +151,11 @@ async fn get_prices(api_key: &str) -> reqwest::Result<Vec<TibberPricePoint>> {
 fn parse_prices_json(json: &str) -> Vec<TibberPricePoint> {
     let data = serde_json::from_str::<Response>(json).expect("Failed to parse tibber's response");
 
-    return data.data.viewer.homes[0]
+    data.data.viewer.homes[0]
         .current_subscription
         .price_info
-        .today
-        .clone();
+        .prices
+        .clone()
 }
 
 #[derive(Deserialize, Debug)]
@@ -102,7 +187,7 @@ struct CurrentSubscription {
 
 #[derive(Deserialize, Debug)]
 struct PriceInfo {
-    today: Vec<TibberPricePoint>,
+    prices: Vec<TibberPricePoint>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

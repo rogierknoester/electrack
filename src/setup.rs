@@ -1,4 +1,3 @@
-use core::panic;
 use log::debug;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
@@ -46,7 +45,7 @@ fn resolve_electricity_provider(dsn: &str) -> impl ElectricityPriceProvider {
     });
 
     debug!("trying to resolve provider \"{}\"", dsn.driver);
-    return match dsn.driver.as_str() {
+    match dsn.driver.as_str() {
         "tibber" => tibber::Tibber::new(
             dsn.username
                 .expect("cannot create a tibber instance from the provided dsn"),
@@ -57,7 +56,7 @@ fn resolve_electricity_provider(dsn: &str) -> impl ElectricityPriceProvider {
             );
             process::exit(1);
         }
-    };
+    }
 }
 
 async fn setup_db(db_dsn: &str) -> sqlx::PgPool {
@@ -74,6 +73,7 @@ async fn setup_db(db_dsn: &str) -> sqlx::PgPool {
 
 #[derive(Clone)]
 pub(crate) struct AppState {
+    #[allow(dead_code)]
     pub(crate) db: PgPool,
     pub(crate) electricity_provider: Arc<dyn ElectricityPriceProvider>,
     pub(crate) price_repository: Arc<dyn PriceRepository>,

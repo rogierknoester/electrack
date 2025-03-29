@@ -14,6 +14,7 @@ pub(crate) enum PriceRepositoryError {
 
 #[async_trait]
 pub(crate) trait PriceRepository: Send + Sync {
+    #[allow(dead_code)]
     async fn fetch_prices_of_date(&self, date: NaiveDate) -> Result<Vec<PricePoint>, String>;
 
     async fn persist_prices(
@@ -32,6 +33,9 @@ pub(crate) trait PriceRepository: Send + Sync {
     /// Fetch the window for the given duration that is the cheapest.
     /// Will consider the beginning of the current hour as the "starting" moment.
     async fn fetch_optimal_upcoming_window(&self, duration: i32) -> Result<PriceWindow, String>;
+
+    /// Check if any prices of the given date are present
+    async fn has_prices_of_date(&self, date: NaiveDate) -> Result<bool, String>;
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +61,16 @@ impl PriceRepository for PostgresPriceRepository {
         .map_err(|e| e.to_string())?;
 
         Ok(rows)
+    }
+
+    async fn has_prices_of_date(&self, date: NaiveDate) -> Result<bool, String> {
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM prices WHERE moment::date = $1")
+            .bind(date)
+            .fetch_one(&self.db)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(row.0 > 0)
     }
 
     async fn persist_prices(
@@ -135,7 +149,6 @@ impl PriceRepository for PostgresPriceRepository {
 
     async fn fetch_optimal_upcoming_window(&self, duration: i32) -> Result<PriceWindow, String> {
         let duration = (duration - 1).clamp(0, 23);
-        info!("{}", duration);
 
         let price_window = sqlx::query_as::<_, PriceWindow>(r#"
             select moment                                                                        as starts_at,
