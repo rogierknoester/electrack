@@ -38,3 +38,19 @@ GET /time-slots?durations=2,3&moment_start=2024-06-30t09%3A52%3A07%2B02%3A00&mom
 ```
 
 
+#### Upcoming windows
+This endpoint allows you to request upcoming windows, without needing to care about providing a starting and ending moment
+
+For example, to get the first upcoming cheapest window of 2 hours:
+
+```HTTP
+GET /upcoming?durations=2
+```
+
+Which will return
+```json
+[{"starts_at":"2025-03-28T11:00:00Z","ends_at":"2025-03-28T13:59:59Z","average_price":"0.152"}]
+```
+
+
+

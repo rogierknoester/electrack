@@ -5,7 +5,7 @@ use axum::{
 };
 use axum_macros::debug_handler;
 
-use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, FixedOffset, Local, NaiveDate};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -41,34 +41,9 @@ pub(crate) async fn start_http_server() -> Result<(), std::io::Error> {
 
 #[derive(Debug, Clone, Deserialize)]
 struct TimeslotParameters {
-    durations: String,
+    durations: Durations,
     moment_start: DateTime<FixedOffset>,
     moment_end: DateTime<FixedOffset>,
-}
-
-impl TimeslotParameters {
-    fn get_durations(&self) -> Vec<i32> {
-        self.durations
-            .split(',')
-            .filter_map(|s| s.parse::<i32>().ok())
-            .collect::<Vec<i32>>()
-    }
-}
-
-impl Default for TimeslotParameters {
-    fn default() -> Self {
-        Self {
-            durations: "".to_string(),
-            moment_start: Utc::now()
-                .with_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-                .unwrap()
-                .fixed_offset(),
-            moment_end: Utc::now()
-                .with_time(NaiveTime::from_hms_opt(23, 59, 59).unwrap())
-                .unwrap()
-                .fixed_offset(),
-        }
-    }
 }
 
 /// Fetch the timeslots between a start and end moment that are the cheapest for the given
@@ -94,7 +69,7 @@ async fn get_time_slots(
         }
     }
 
-    let durations = parameters.get_durations();
+    let durations = parameters.durations.parse();
 
     let timezone_date_start = parameters.moment_start.timezone();
 
@@ -163,19 +138,26 @@ async fn fetch_prices_of_today_from_provider(
 /// Contains only the requested durations
 #[derive(Debug, Clone, Deserialize)]
 struct UpcomingParameters {
-    durations: String,
+    durations: Durations,
 }
 
-impl UpcomingParameters {
-    fn get_durations(&self) -> Vec<i32> {
-        self.durations
+#[derive(Debug, Clone, Deserialize)]
+struct Durations(Option<String>);
+
+impl Durations {
+    fn parse(&self) -> Vec<i32> {
+        self.0
+            .clone()
+            .unwrap_or("1".to_owned())
             .split(',')
             .filter_map(|s| s.parse::<i32>().ok())
             .collect::<Vec<i32>>()
     }
 }
 
-/// The route to fetch (multiple) upcoming windows.
+/// Fetch (multiple) upcoming windows. Passing window durations is optional, if none is given a
+/// window of 1 hour is assumed.
+/// The current time will be used for fetching
 async fn get_upcoming_windows(
     State(state): State<AppState>,
     parameters: Query<UpcomingParameters>,
@@ -195,7 +177,7 @@ async fn get_upcoming_windows(
         }
     }
 
-    let durations = parameters.get_durations();
+    let durations = parameters.durations.parse();
 
     let mut windows: Vec<PriceWindow> = vec![];
 

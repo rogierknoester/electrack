@@ -51,9 +51,12 @@ fn resolve_electricity_provider(dsn: &str) -> impl ElectricityPriceProvider {
             dsn.username
                 .expect("cannot create a tibber instance from the provided dsn"),
         ),
-        _ => panic!(
-            "the provided ELECTRICITY_PRICE_PROVIDER_DSN does not match any supported provider"
-        ),
+        _ => {
+            error!(
+                "the provided ELECTRICITY_PRICE_PROVIDER_DSN does not match any supported provider"
+            );
+            process::exit(1);
+        }
     };
 }
 

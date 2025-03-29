@@ -29,6 +29,8 @@ pub(crate) trait PriceRepository: Send + Sync {
         durations: &[i32],
     ) -> Result<Vec<PriceWindow>, String>;
 
+    /// Fetch the window for the given duration that is the cheapest.
+    /// Will consider the beginning of the current hour as the "starting" moment.
     async fn fetch_optimal_upcoming_window(&self, duration: i32) -> Result<PriceWindow, String>;
 }
 
@@ -130,7 +132,8 @@ impl PriceRepository for PostgresPriceRepository {
     }
 
     async fn fetch_optimal_upcoming_window(&self, duration: i32) -> Result<PriceWindow, String> {
-        let duration = duration.clamp(0, 23);
+        let duration = (duration - 1).clamp(0, 23);
+        info!("{}", duration);
 
         let price_window = sqlx::query_as::<_, PriceWindow>(r#"
             select moment                                                                        as starts_at,
