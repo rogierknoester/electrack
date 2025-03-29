@@ -3,3 +3,4 @@
 .env
 result
 .direnv
+dev_db.sql
