@@ -74,7 +74,7 @@ impl PriceRepository for PostgresPriceRepository {
         info!("Persisting {} prices for {}", prices.len(), provider.name);
 
         let mut query_builder =
-            QueryBuilder::new("insert into prices (moment, price, provider_id)");
+            QueryBuilder::new("insert into prices (moment, price, provider_id) ");
 
         query_builder.push_values(prices, |mut builder, price| {
             builder
@@ -82,6 +82,8 @@ impl PriceRepository for PostgresPriceRepository {
                 .push_bind(price.monetary_amount)
                 .push_bind(provider.id);
         });
+
+        query_builder.push("on conflict(moment, provider_id) do nothing");
 
         let query = query_builder.build();
 
