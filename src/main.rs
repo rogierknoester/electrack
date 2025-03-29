@@ -6,7 +6,6 @@ use crate::http::start_http_server;
 
 mod domain;
 mod http;
-mod nordpool;
 mod price_repository;
 mod setup;
 mod tibber;
