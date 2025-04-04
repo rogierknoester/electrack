@@ -2,7 +2,7 @@ use axum::async_trait;
 use chrono::{DateTime, NaiveDate, Timelike, Utc};
 use sqlx::{FromRow, PgPool, QueryBuilder};
 use thiserror::Error;
-use tracing::{error, info, instrument};
+use tracing::{debug, error, info, instrument};
 
 use crate::domain::{PricePoint, PriceWindow};
 
@@ -78,6 +78,11 @@ impl PriceRepository for PostgresPriceRepository {
         prices: &[PricePoint],
         provider_name: &str,
     ) -> Result<(), PriceRepositoryError> {
+        if prices.is_empty() {
+            debug!("persist called with 0 prices, which is a noop when persisting");
+            return Ok(());
+        }
+
         let provider: Provider =
             sqlx::query_as("select id, name from providers where name = $1 limit 1")
                 .bind(provider_name)
