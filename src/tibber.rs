@@ -6,10 +6,12 @@ use chrono::DateTime;
 use chrono::Local;
 use chrono::Utc;
 use log::info;
+use reqwest::header;
 use reqwest::Client;
 use serde_derive::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
+use tracing::debug;
 use tracing::error;
 
 use crate::domain::ElectricityPriceProvider;
@@ -22,26 +24,29 @@ const TIBBER_NAME: &str = "tibber";
 #[derive(Clone, Debug)]
 pub(crate) struct Tibber {
     api_key: String,
+    house_nickname: String,
 }
 
 impl Tibber {
-    pub(crate) fn new(api_key: String) -> Self {
-        Self { api_key }
+    pub(crate) fn new(api_key: String, house_nickname: String) -> Self {
+        Self { api_key, house_nickname }
     }
 }
 
 #[async_trait]
 impl ElectricityPriceProvider for Tibber {
     async fn monitor_prices(&self, price_repository: Arc<dyn PriceRepository>) -> JoinHandle<()> {
-        monitor_tibber_prices(&self.api_key, price_repository)
+        monitor_tibber_prices(&self.api_key, &self.house_nickname, price_repository)
     }
 }
 
 fn monitor_tibber_prices(
     api_key: &str,
+    house_nickname: &str,
     price_repository: Arc<dyn PriceRepository>,
 ) -> JoinHandle<()> {
     let api_key = api_key.to_owned();
+    let house_nickname = house_nickname.to_owned();
     let price_repository = price_repository.clone();
     tokio::task::spawn(async move {
         loop {
@@ -54,7 +59,7 @@ fn monitor_tibber_prices(
                 .unwrap_or(false)
             {
                 info!("prices for today have not been fetched yet, doing that now");
-                match fetch_prices_for_moment(api_key.as_str(), Moment::Today).await {
+                match fetch_prices_for_moment(api_key.as_str(), house_nickname.as_str(), Moment::Today).await {
                     Ok(fetched_prices) => {
                         match price_repository
                             .persist_prices(&fetched_prices, TIBBER_NAME)
@@ -73,7 +78,7 @@ fn monitor_tibber_prices(
                 .unwrap_or(false)
             {
                 info!("prices for tomorrow have not been fetched yet, doing that now");
-                match fetch_prices_for_moment(api_key.as_str(), Moment::Tomorrow).await {
+                match fetch_prices_for_moment(api_key.as_str(), house_nickname.as_str(), Moment::Tomorrow).await {
                     Ok(fetched_prices) => {
                         match price_repository
                             .persist_prices(&fetched_prices, TIBBER_NAME)
@@ -93,8 +98,8 @@ fn monitor_tibber_prices(
     })
 }
 
-const TODAY: &str = r#"{ "query": "{ viewer { homes { currentSubscription { priceInfo { prices: today { total startsAt }  }}}}}" }"#;
-const TOMORROW: &str = r#"{ "query": "{ viewer { homes { currentSubscription { priceInfo { prices: tomorrow { total startsAt } }}}}}" }"#;
+const TODAY: &str = r#"{ "query": "{ viewer { homes { appNickname currentSubscription { priceInfo { prices: today { total startsAt }  } } } } }" }"#;
+const TOMORROW: &str = r#"{ "query": "{ viewer { homes { appNickname currentSubscription { priceInfo { prices: tomorrow { total startsAt } } } } } }" }"#;
 
 enum Moment {
     Today,
@@ -104,9 +109,10 @@ enum Moment {
 /// Fetch the prices for either today or tomorrow
 async fn fetch_prices_for_moment(
     api_key: &str,
+    house_nickname: &str,
     moment: Moment,
 ) -> Result<Vec<PricePoint>, ElectricityProviderError> {
-    fetch_tibber_prices(api_key, moment)
+    fetch_tibber_prices(api_key, house_nickname, moment)
         .await
         .map_err(|e| ElectricityProviderError::FetchPrices(e.to_string()))
         .map(|prices| {
@@ -120,8 +126,9 @@ async fn fetch_prices_for_moment(
 /// Actually fetch the prices from Tibber's api and return their data structure
 async fn fetch_tibber_prices(
     api_key: &str,
+    house_nickname: &str,
     moment: Moment,
-) -> reqwest::Result<Vec<TibberPricePoint>> {
+) -> Result<Vec<TibberPricePoint>, String> {
     info!("Fetching prices from tibber");
 
     let query = match moment {
@@ -137,25 +144,33 @@ async fn fetch_tibber_prices(
         .header("Content-Type", "application/json")
         .body(query.to_owned())
         .send()
-        .await?;
+        .await.map_err(|err| err.to_string())?;
 
-    let body = response.text().await?;
+    let body = response.text().await.map_err(|err| err.to_string())?;
 
-    let prices = parse_prices_json(&body);
+    eprintln!("{:?}", body);
+
+    let prices = parse_prices_json(&body, house_nickname)?;
 
     info!("Fetched {} prices from tibber", prices.len());
 
     Ok(prices)
 }
 
-fn parse_prices_json(json: &str) -> Vec<TibberPricePoint> {
+fn parse_prices_json(json: &str, house_nickname: &str) -> Result<Vec<TibberPricePoint>, String> {
     let data = serde_json::from_str::<Response>(json).expect("Failed to parse tibber's response");
 
-    data.data.viewer.homes[0]
-        .current_subscription
-        .price_info
-        .prices
-        .clone()
+    for home in data.data.viewer.homes {
+        if home.nickname == house_nickname {
+            let Some(subscription) = home.current_subscription else { continue; };
+
+            return Ok(subscription.price_info.prices.clone())
+        } else {
+            debug!("skipping house with name {} because it doesn't match {}", home.nickname, house_nickname);
+        }
+    }
+
+    Err(String::from("no house found in tibber's data with prices"))
 }
 
 #[derive(Deserialize, Debug)]
@@ -175,8 +190,10 @@ struct Viewer {
 
 #[derive(Deserialize, Debug)]
 struct Home {
+    #[serde(rename = "appNickname")]
+    nickname: String,
     #[serde(rename = "currentSubscription")]
-    current_subscription: CurrentSubscription,
+    current_subscription: Option<CurrentSubscription>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -213,10 +230,10 @@ mod tests {
     #[test]
     fn test_parse_prices_json() {
         let json = r#"
-            {"data":{"viewer":{"homes":[{"currentSubscription":{"priceInfo":{"today":[{"total":0.2821,"startsAt":"2024-06-15T00:00:00.000+02:00"},{"total":0.2787,"startsAt":"2024-06-15T01:00:00.000+02:00"},{"total":0.2666,"startsAt":"2024-06-15T02:00:00.000+02:00"},{"total":0.2581,"startsAt":"2024-06-15T03:00:00.000+02:00"},{"total":0.2213,"startsAt":"2024-06-15T04:00:00.000+02:00"},{"total":0.1769,"startsAt":"2024-06-15T05:00:00.000+02:00"},{"total":0.1547,"startsAt":"2024-06-15T06:00:00.000+02:00"},{"total":0.1529,"startsAt":"2024-06-15T07:00:00.000+02:00"},{"total":0.1528,"startsAt":"2024-06-15T08:00:00.000+02:00"},{"total":0.1528,"startsAt":"2024-06-15T09:00:00.000+02:00"},{"total":0.1406,"startsAt":"2024-06-15T10:00:00.000+02:00"},{"total":0.1177,"startsAt":"2024-06-15T11:00:00.000+02:00"},{"total":0.0985,"startsAt":"2024-06-15T12:00:00.000+02:00"},{"total":0.0736,"startsAt":"2024-06-15T13:00:00.000+02:00"},{"total":0.056,"startsAt":"2024-06-15T14:00:00.000+02:00"},{"total":0.0849,"startsAt":"2024-06-15T15:00:00.000+02:00"},{"total":0.1175,"startsAt":"2024-06-15T16:00:00.000+02:00"},{"total":0.1474,"startsAt":"2024-06-15T17:00:00.000+02:00"},{"total":0.1528,"startsAt":"2024-06-15T18:00:00.000+02:00"},{"total":0.1917,"startsAt":"2024-06-15T19:00:00.000+02:00"},{"total":0.2375,"startsAt":"2024-06-15T20:00:00.000+02:00"},{"total":0.2348,"startsAt":"2024-06-15T21:00:00.000+02:00"},{"total":0.2294,"startsAt":"2024-06-15T22:00:00.000+02:00"},{"total":0.2021,"startsAt":"2024-06-15T23:00:00.000+02:00"}]}}}]}}}
+            {"data":{"viewer":{"homes":[{"appNickname": "my-house", "currentSubscription":{"priceInfo":{"today":[{"total":0.2821,"startsAt":"2024-06-15T00:00:00.000+02:00"},{"total":0.2787,"startsAt":"2024-06-15T01:00:00.000+02:00"},{"total":0.2666,"startsAt":"2024-06-15T02:00:00.000+02:00"},{"total":0.2581,"startsAt":"2024-06-15T03:00:00.000+02:00"},{"total":0.2213,"startsAt":"2024-06-15T04:00:00.000+02:00"},{"total":0.1769,"startsAt":"2024-06-15T05:00:00.000+02:00"},{"total":0.1547,"startsAt":"2024-06-15T06:00:00.000+02:00"},{"total":0.1529,"startsAt":"2024-06-15T07:00:00.000+02:00"},{"total":0.1528,"startsAt":"2024-06-15T08:00:00.000+02:00"},{"total":0.1528,"startsAt":"2024-06-15T09:00:00.000+02:00"},{"total":0.1406,"startsAt":"2024-06-15T10:00:00.000+02:00"},{"total":0.1177,"startsAt":"2024-06-15T11:00:00.000+02:00"},{"total":0.0985,"startsAt":"2024-06-15T12:00:00.000+02:00"},{"total":0.0736,"startsAt":"2024-06-15T13:00:00.000+02:00"},{"total":0.056,"startsAt":"2024-06-15T14:00:00.000+02:00"},{"total":0.0849,"startsAt":"2024-06-15T15:00:00.000+02:00"},{"total":0.1175,"startsAt":"2024-06-15T16:00:00.000+02:00"},{"total":0.1474,"startsAt":"2024-06-15T17:00:00.000+02:00"},{"total":0.1528,"startsAt":"2024-06-15T18:00:00.000+02:00"},{"total":0.1917,"startsAt":"2024-06-15T19:00:00.000+02:00"},{"total":0.2375,"startsAt":"2024-06-15T20:00:00.000+02:00"},{"total":0.2348,"startsAt":"2024-06-15T21:00:00.000+02:00"},{"total":0.2294,"startsAt":"2024-06-15T22:00:00.000+02:00"},{"total":0.2021,"startsAt":"2024-06-15T23:00:00.000+02:00"}]}}}]}}}
             "#;
 
-        let prices = parse_prices_json(json);
+        let Ok(prices) = parse_prices_json(json, "my-house") else { panic!("cannot parse prices")};
 
         assert_eq!(prices.len(), 24);
         assert_eq!(prices[0].total, 0.2821);

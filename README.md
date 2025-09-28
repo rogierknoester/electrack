@@ -16,14 +16,14 @@ Some configuration is required:
 
 Configure them with
 ```env
-ELECTRICITY_PRICE_PROVIDER_DSN=tibber://{api_key}
+ELECTRICITY_PRICE_PROVIDER_DSN=tibber://{api_key}@https(api.tibber.com)/?house_nickname=my-house
 DATABASE_URL=postgres://username:password@hostname/db_name
 ```
 
 Database migrations will be executed on startup.
 
 #### Tibber API
-Tibber has an API that any customer can request access to. You can find that [here](https://developer.tibber.com/). Your API key can be seen [here](https://developer.tibber.com/settings/access-token).
+Tibber has an API that any customer can request access to. You can find that [here](https://developer.tibber.com/). Your API key can be seen [here](https://developer.tibber.com/settings/access-token). Your house nickname can be configured in the Tibber app.
 
 
 

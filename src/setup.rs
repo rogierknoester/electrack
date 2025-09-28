@@ -47,8 +47,8 @@ fn resolve_electricity_provider(dsn: &str) -> impl ElectricityPriceProvider {
     debug!("trying to resolve provider \"{}\"", dsn.driver);
     match dsn.driver.as_str() {
         "tibber" => tibber::Tibber::new(
-            dsn.username
-                .expect("cannot create a tibber instance from the provided dsn"),
+            dsn.username.expect("cannot create a tibber instance from the provided dsn because username is missing"),
+                dsn.params.get("house_nickname").expect("cannot create a tibber instance from the provided dsn because house_nickname is missing").to_string()
         ),
         _ => {
             error!(
